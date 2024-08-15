@@ -1534,151 +1534,79 @@ http.listen(4000, function () {
         //     return false;
         // });
 
-        // download file
-        app.post("/DownloadFile", async function (request, result) {
-            const _id = request.fields._id;
+        app.get("/DownloadFile", async function (request, result) {
+	    try {
+	        const fileId = request.query.fileId; // Expecting fileId from query parameters
+	
+	        if (!fileId) {
+	            return result.status(400).json({
+	                "status": "error",
+	                "message": "File ID is required."
+	            });
+	        }
+	
+	        if (request.session.user) {
+	            // Fetch the user from the session
+	            const user = await database.collection("users").findOne({
+	                "_id": ObjectId(request.session.user._id),
+	                "uploaded._id": ObjectId(fileId)
+	            });
+	
+	            if (!user) {
+	                return result.status(404).json({
+	                    "status": "error",
+	                    "message": "File not found or you don't have permission to download it."
+	                });
+	            }
+	
+	            // Find the file in user's uploaded files
+	            const file = user.uploaded.find(f => f._id.equals(ObjectId(fileId)));
+	            if (!file) {
+	                return result.status(404).json({
+	                    "status": "error",
+	                    "message": "File not found."
+	                });
+	            }
+	
+	            const encryptedFilePath = file.filePath;
+	            const decryptedFilePath = path.join("temp", file.name);
+	
+	            // Decrypt and decompress (if applicable) the file for download
+	            await decryptAndDecompressFile(encryptedFilePath, decryptedFilePath, file.wasCompressed);
+	
+	            // Send the decrypted file for download
+	            result.download(decryptedFilePath, async function (err) {
+	                if (err) {
+	                    console.error("Error during file download:", err);
+	                    return result.status(500).json({
+	                        "status": "error",
+	                        "message": "Failed to download the file."
+	                    });
+	                }
+	
+	                // Optionally, after the download, re-encrypt and recompress the file and store it back
+	                await compressAndEncryptFile(decryptedFilePath, encryptedFilePath, file.wasCompressed);
+	
+	                // Optionally delete the decrypted file from the temp folder after download
+	                fileSystem.unlink(decryptedFilePath, function (err) {
+	                    if (err) throw err;
+	                    console.log("Decrypted file deleted after download.");
+	                });
+	            });
+	            return;
+	        }
+	
+	        result.redirect("/Login");
+	
+	    } catch (error) {
+	        console.error("Error during file download:", error);
+	        result.status(500).json({
+	            "status": "error",
+	            "message": "An error occurred while downloading the file."
+	        });
+	    }
+	});
 
-            var link = await database.collection("public_links").findOne({
-                "file._id": ObjectId(_id)
-            });
-
-            if (link != null) {
-                fileSystem.readFile(link.file.filePath, async function (error, data) {
-                    // console.log(error);
-
-                    // increment the downloads
-                    link.downloads++;
-                    await database.collection("public_links").findOneAndUpdate({
-                        "file._id": ObjectId(_id)
-                    }, {
-                        $set: {
-                            "downloads": link.downloads
-                        }
-                    });
-
-                    result.json({
-                        "status": "success",
-                        "message": "Data has been fetched.",
-                        "arrayBuffer": data,
-                        "fileType": link.file.type,
-                        // "file": mainURL + "/" + file.filePath,
-                        "fileName": link.file.name
-                    });
-                });
-                return false;
-            }
-
-            if (request.session.user) {
-
-                var user = await database.collection("users").findOne({
-                    "_id": ObjectId(request.session.user._id)
-                });
-
-                var fileUploaded = await functions.recursiveGetFile(user.uploaded, _id);
-                var fileShared = await functions.recursiveGetSharedFile(user.sharedWithMe, _id);
-                
-                if (fileUploaded == null && fileShared == null) {
-                    result.json({
-                        "status": "error",
-                        "message": "File is neither uploaded nor shared with you."
-                    });
-                    return false;
-                }
-
-                var file = (fileUploaded == null) ? fileShared : fileUploaded;
-
-                /*fileSystem.readFile(file.filePath, function (error, data) {
-                    // console.log(error);
-
-                    result.json({
-                        "status": "success",
-                        "message": "Data has been fetched.",
-                        "arrayBuffer": data,
-                        "fileType": file.type,
-                        // "file": mainURL + "/" + file.filePath,
-                        "fileName": file.name
-                    });
-                });*/
-
-                var CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
-                var buffer = Buffer.alloc(CHUNK_SIZE);
-                var bufferArr = [];
-                var totalSizeRead = 0;
-
-                // Read file stats
-                const userSocketID = socketUsers[request.session.user._id];
-
-                console.log(file.filePath);
-
-                fileSystem.open(file.filePath, 'r', function(err, fd) {
-                    if (err) throw err;
-                    function readNextChunk() {
-                        fileSystem.read(fd, buffer, 0, CHUNK_SIZE, null, function(err, nread) {
-                            if (err) throw err;
-
-                            if (nread === 0) {
-                                // done reading file, do any necessary finalization steps
-
-                                socketIO.to(userSocketID).emit("download_completed", {
-                                    "fileType": file.type,
-                                    "fileName": file.name
-                                });
-
-                                fileSystem.close(fd, function(err) {
-                                    if (err) throw err;
-                                });
-
-                                result.json({
-                                    "status": "success",
-                                    "message": "Data has been fetched."
-                                });
-                                return;
-                            }
-
-                            var data;
-                            if (nread < CHUNK_SIZE) {
-                                data = buffer.slice(0, nread);
-                            } else {
-                                data = buffer;
-                            }
-
-                            if (totalSizeRead < file.size) {
-                                socketIO.to(userSocketID).emit("download_chunk_received", data);
-                                
-                                bufferArr.push(data);
-                                totalSizeRead += CHUNK_SIZE;
-                                
-                                readNextChunk();
-                            }
-                            // do something with `data`, then call `readNextChunk();`
-                        });
-                    }
-                    readNextChunk();
-                });
-
-                return false;
-
-                // read binary data
-                /*var bitmap = fileSystem.readFileSync(file.filePath);
-                // convert binary data to base64 encoded string
-                var base64str = new Buffer(bitmap).toString('base64');
-                result.json({
-                    "status": "success",
-                    "message": "Data has been fetched.",
-                    "arrayBuffer": "",
-                    "base64str": base64str,
-                    "fileType": file.type,
-                    "fileName": file.name
-                });
-                return false;*/
-            }
-
-            result.json({
-                "status": "error",
-                "message": "Please login to perform this action."
-            });
-            return false;
-        });
 
         // app.post("/GetFileContent", async function (request, result) {
         //     const _id = request.fields._id;
