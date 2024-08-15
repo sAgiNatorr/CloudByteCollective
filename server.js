@@ -2520,6 +2520,7 @@ http.listen(4000, function () {
             }
         });
 
+	// home page    
         app.get("/", function (request, result) {
             if (request.session && request.session.user) {
                 // If user is logged in, redirect to their dashboard or another appropriate page
@@ -2530,17 +2531,10 @@ http.listen(4000, function () {
                 }
             } else {
                 // If user is not logged in, render the Landing Page
-                result.render("LandingPage", {
+                result.render("index", {
                     "request": request
                 });
             }
-        });
-        
-        // home page
-        app.get("/", function (request, result) {
-            result.render("index", {
-                "request": request
-            });
         });
     });
 });
