@@ -1546,7 +1546,7 @@ http.listen(4000, function () {
 	        }
 	
 	        if (request.session.user) {
-	            // Fetch the user from the session
+	            // Fetch the user and find the file with fileId
 	            const user = await database.collection("users").findOne({
 	                "_id": ObjectId(request.session.user._id),
 	                "uploaded._id": ObjectId(fileId)
@@ -1559,7 +1559,7 @@ http.listen(4000, function () {
 	                });
 	            }
 	
-	            // Find the file in user's uploaded files
+	            // Find the file in the user's uploaded files
 	            const file = user.uploaded.find(f => f._id.equals(ObjectId(fileId)));
 	            if (!file) {
 	                return result.status(404).json({
@@ -1571,7 +1571,7 @@ http.listen(4000, function () {
 	            const encryptedFilePath = file.filePath;
 	            const decryptedFilePath = path.join("temp", file.name);
 	
-	            // Decrypt and decompress (if applicable) the file for download
+	            // Decrypt and decompress the file
 	            await decryptAndDecompressFile(encryptedFilePath, decryptedFilePath, file.wasCompressed);
 	
 	            // Send the decrypted file for download
@@ -1584,7 +1584,7 @@ http.listen(4000, function () {
 	                    });
 	                }
 	
-	                // Optionally, after the download, re-encrypt and recompress the file and store it back
+	                // After download, re-encrypt and recompress the file (optional)
 	                await compressAndEncryptFile(decryptedFilePath, encryptedFilePath, file.wasCompressed);
 	
 	                // Optionally delete the decrypted file from the temp folder after download
@@ -1606,6 +1606,7 @@ http.listen(4000, function () {
 	        });
 	    }
 	});
+
 
 
         // app.post("/GetFileContent", async function (request, result) {
