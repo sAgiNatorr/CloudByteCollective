@@ -27,15 +27,15 @@
 
                 <div class="form-group">
                     <label>Payment Details</label>
-                    <input type="cardNo" placeholder="Card Number" name="cardNo" class="form-control" required />
+                    <input type="cardNo" placeholder="Card Number" name="cardNo" class="form-control" pattern="\d{16}" maxlength="16" required />
                 </div>
 
                 <div class="form-group">
-                    <input type="CCV" placeholder="CCV" name="CCV" class="form-control" />
+                    <input type="CCV" placeholder="CCV" name="CCV" class="form-control" pattern="\d{4}" maxlength="4" required/>
                 </div>
 
                 <div class="form-group">
-                    <input type="expiryDate" placeholder="Expiry Date" name="expiryDate" class="form-control" required />
+                    <input type="expiryDate" placeholder="Please enter a valid expiry date in MM/YY format (e.g. 08/24)" name="expiryDate" class="form-control" pattern="(0[1-9]|1[0-2])\/\d{2}" placeholder="MM/YY" maxlength="5" required />
                 </div>
 
                 <input type="submit" value="Register" class="btn btn-primary" />
