@@ -1534,80 +1534,151 @@ http.listen(4000, function () {
         //     return false;
         // });
 
-        app.get("/DownloadFile", async function (request, result) {
-	    try {
-	        const fileId = request.query.fileId; // Expecting fileId from query parameters
-	
-	        if (!fileId) {
-	            return result.status(400).json({
-	                "status": "error",
-	                "message": "File ID is required."
-	            });
-	        }
-	
-	        if (request.session.user) {
-	            // Fetch the user and find the file with fileId
-	            const user = await database.collection("users").findOne({
-	                "_id": ObjectId(request.session.user._id),
-	                "uploaded._id": ObjectId(fileId)
-	            });
-	
-	            if (!user) {
-	                return result.status(404).json({
-	                    "status": "error",
-	                    "message": "File not found or you don't have permission to download it."
-	                });
-	            }
-	
-	            // Find the file in the user's uploaded files
-	            const file = user.uploaded.find(f => f._id.equals(ObjectId(fileId)));
-	            if (!file) {
-	                return result.status(404).json({
-	                    "status": "error",
-	                    "message": "File not found."
-	                });
-	            }
-	
-	            const encryptedFilePath = file.filePath;
-	            const decryptedFilePath = path.join("temp", file.name);
-	
-	            // Decrypt and decompress the file
-	            await decryptAndDecompressFile(encryptedFilePath, decryptedFilePath, file.wasCompressed);
-	
-	            // Send the decrypted file for download
-	            result.download(decryptedFilePath, async function (err) {
-	                if (err) {
-	                    console.error("Error during file download:", err);
-	                    return result.status(500).json({
-	                        "status": "error",
-	                        "message": "Failed to download the file."
-	                    });
-	                }
-	
-	                // After download, re-encrypt and recompress the file (optional)
-	                await compressAndEncryptFile(decryptedFilePath, encryptedFilePath, file.wasCompressed);
-	
-	                // Optionally delete the decrypted file from the temp folder after download
-	                fileSystem.unlink(decryptedFilePath, function (err) {
-	                    if (err) throw err;
-	                    console.log("Decrypted file deleted after download.");
-	                });
-	            });
-	            return;
-	        }
-	
-	        result.redirect("/Login");
-	
-	    } catch (error) {
-	        console.error("Error during file download:", error);
-	        result.status(500).json({
-	            "status": "error",
-	            "message": "An error occurred while downloading the file."
-	        });
-	    }
-	});
+        // download file
+        app.post("/DownloadFile", async function (request, result) {
+            const _id = request.fields._id;
 
+            var link = await database.collection("public_links").findOne({
+                "file._id": ObjectId(_id)
+            });
 
+            if (link != null) {
+                fileSystem.readFile(link.file.filePath, async function (error, data) {
+                    // console.log(error);
+
+                    // increment the downloads
+                    link.downloads++;
+                    await database.collection("public_links").findOneAndUpdate({
+                        "file._id": ObjectId(_id)
+                    }, {
+                        $set: {
+                            "downloads": link.downloads
+                        }
+                    });
+
+                    result.json({
+                        "status": "success",
+                        "message": "Data has been fetched.",
+                        "arrayBuffer": data,
+                        "fileType": link.file.type,
+                        // "file": mainURL + "/" + file.filePath,
+                        "fileName": link.file.name
+                    });
+                });
+                return false;
+            }
+
+            if (request.session.user) {
+
+                var user = await database.collection("users").findOne({
+                    "_id": ObjectId(request.session.user._id)
+                });
+
+                var fileUploaded = await functions.recursiveGetFile(user.uploaded, _id);
+                var fileShared = await functions.recursiveGetSharedFile(user.sharedWithMe, _id);
+                
+                if (fileUploaded == null && fileShared == null) {
+                    result.json({
+                        "status": "error",
+                        "message": "File is neither uploaded nor shared with you."
+                    });
+                    return false;
+                }
+
+                var file = (fileUploaded == null) ? fileShared : fileUploaded;
+
+                /*fileSystem.readFile(file.filePath, function (error, data) {
+                    // console.log(error);
+
+                    result.json({
+                        "status": "success",
+                        "message": "Data has been fetched.",
+                        "arrayBuffer": data,
+                        "fileType": file.type,
+                        // "file": mainURL + "/" + file.filePath,
+                        "fileName": file.name
+                    });
+                });*/
+
+                var CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
+                var buffer = Buffer.alloc(CHUNK_SIZE);
+                var bufferArr = [];
+                var totalSizeRead = 0;
+
+                // Read file stats
+                const userSocketID = socketUsers[request.session.user._id];
+
+                console.log(file.filePath);
+
+                fileSystem.open(file.filePath, 'r', function(err, fd) {
+                    if (err) throw err;
+                    function readNextChunk() {
+                        fileSystem.read(fd, buffer, 0, CHUNK_SIZE, null, function(err, nread) {
+                            if (err) throw err;
+
+                            if (nread === 0) {
+                                // done reading file, do any necessary finalization steps
+
+                                socketIO.to(userSocketID).emit("download_completed", {
+                                    "fileType": file.type,
+                                    "fileName": file.name
+                                });
+
+                                fileSystem.close(fd, function(err) {
+                                    if (err) throw err;
+                                });
+
+                                result.json({
+                                    "status": "success",
+                                    "message": "Data has been fetched."
+                                });
+                                return;
+                            }
+
+                            var data;
+                            if (nread < CHUNK_SIZE) {
+                                data = buffer.slice(0, nread);
+                            } else {
+                                data = buffer;
+                            }
+
+                            if (totalSizeRead < file.size) {
+                                socketIO.to(userSocketID).emit("download_chunk_received", data);
+                                
+                                bufferArr.push(data);
+                                totalSizeRead += CHUNK_SIZE;
+                                
+                                readNextChunk();
+                            }
+                            // do something with `data`, then call `readNextChunk();`
+                        });
+                    }
+                    readNextChunk();
+                });
+
+                return false;
+
+                // read binary data
+                /*var bitmap = fileSystem.readFileSync(file.filePath);
+                // convert binary data to base64 encoded string
+                var base64str = new Buffer(bitmap).toString('base64');
+                result.json({
+                    "status": "success",
+                    "message": "Data has been fetched.",
+                    "arrayBuffer": "",
+                    "base64str": base64str,
+                    "fileType": file.type,
+                    "fileName": file.name
+                });
+                return false;*/
+            }
+
+            result.json({
+                "status": "error",
+                "message": "Please login to perform this action."
+            });
+            return false;
+        });
 
         // app.post("/GetFileContent", async function (request, result) {
         //     const _id = request.fields._id;
@@ -1831,165 +1902,228 @@ http.listen(4000, function () {
             result.redirect("/Login");
         });
 
-        const crypto = require("crypto");
-        const fileSystem = require("fs");
-        const path = require("path");
-        const zlib = require("zlib");
-        const { ObjectId } = require("mongodb");
-        
-        const algorithm = "aes-256-cbc";
-        const secretKey = crypto.randomBytes(32);
-        const iv = crypto.randomBytes(16);
-        const MAX_COMPRESSION_SIZE = 300 * 1024 * 1024; // 300MB in bytes
-        
-        function compressAndEncryptFile(filePath, encryptedFilePath, shouldCompress) {
-            const gzip = zlib.createGzip();
-            const cipher = crypto.createCipheriv(algorithm, secretKey, iv);
-            const input = fileSystem.createReadStream(filePath);
-            const output = fileSystem.createWriteStream(encryptedFilePath);
-        
-            if (shouldCompress) {
-                input.pipe(gzip).pipe(cipher).pipe(output);
-            } else {
-                input.pipe(cipher).pipe(output);
-            }
-        
-            return new Promise((resolve, reject) => {
-                output.on("finish", () => resolve(true));
-                output.on("error", (err) => reject(err));
-            });
-        }
-        
-        function decryptAndDecompressFile(encryptedFilePath, decryptedFilePath, wasCompressed) {
-            const decipher = crypto.createDecipheriv(algorithm, secretKey, iv);
-            const gunzip = zlib.createGunzip();
-            const input = fileSystem.createReadStream(encryptedFilePath);
-            const output = fileSystem.createWriteStream(decryptedFilePath);
-        
-            if (wasCompressed) {
-                input.pipe(decipher).pipe(gunzip).pipe(output);
-            } else {
-                input.pipe(decipher).pipe(output);
-            }
-        
-            return new Promise((resolve, reject) => {
-                output.on("finish", () => resolve(true));
-                output.on("error", (err) => reject(err));
-            });
-        }
-        
+                // upload new file
         app.post("/UploadFile", async function (request, result) {
             if (request.session.user) {
+
                 const compression = request.fields.compression;
-                const user = await database.collection("users").findOne({
+
+                var user = await database.collection("users").findOne({
                     "_id": ObjectId(request.session.user._id)
                 });
-        
+                
                 if (request.files.file.size > 0) {
+
                     const type = request.files.file.type;
                     const _id = request.fields._id;
-        
-                    // Check if upload limit exceeded
+
+                    // check if upload limit exceeded
                     const fileSize = request.files.file.size;
                     if (fileSize > user.remainingData) {
                         request.status = "error";
                         request.message = "Kindly buy more data to upload this file.";
-                        result.render("Error", { "request": request });
-                        return;
+                        result.render("Error", {
+                            "request": request
+                        });
+                        return false;
                     }
-        
-                    // Subtract from user remaining data
-                    user.remainingData -= fileSize;
-        
-                    const uploadedObj = {
+
+                    // subtract from user remaining data
+                    user.remainingData = user.remainingData - fileSize;
+
+                    var uploadedObj = {
                         "_id": ObjectId(),
-                        "size": fileSize,
+                        "size": request.files.file.size, // in bytes
                         "name": request.files.file.name,
                         "type": type,
                         "filePath": "",
-                        "createdAt": new Date().getTime(),
-                        "wasCompressed": fileSize <= MAX_COMPRESSION_SIZE
+                        "createdAt": new Date().getTime()
                     };
-        
-                    const currentTimestamp = new Date().getTime();
-                    const filePath = path.join("uploads", currentTimestamp + "-" + request.files.file.name);
-                    const encryptedFilePath = path.join("public/uploads", user.email, currentTimestamp + "-" + request.files.file.name + ".enc");
-        
-                    uploadedObj.filePath = encryptedFilePath;
-        
-                    if (!fileSystem.existsSync(path.join("public/uploads", user.email))) {
-                        fileSystem.mkdirSync(path.join("public/uploads", user.email), { recursive: true });
-                    }
-        
-                    // Compress (if applicable), encrypt, and write the file
-                    await compressAndEncryptFile(request.files.file.path, encryptedFilePath, uploadedObj.wasCompressed);
-        
-                    // Update the user data in the database
-                    await database.collection("users").updateOne(
-                        { "_id": ObjectId(request.session.user._id) },
-                        {
-                            $set: { "remainingData": user.remainingData },
-                            $push: { "uploaded": uploadedObj }
+
+                    var filePath = "";
+                    const isImage = (type == "image/png" || type == "image/jpeg" || type == "image/heic");
+
+                    // if it is the root path
+                    if (_id == "") {
+                        const currentTimestamp = new Date().getTime();
+                        filePath = "uploads/" + currentTimestamp + "-" + request.files.file.name;
+                        const compressedFilePath = "public/uploads/" + user.email + "/";
+                        uploadedObj.filePath = compressedFilePath + currentTimestamp + "-" + request.files.file.name;
+
+                        if (!isImage) {
+                            filePath = uploadedObj.filePath;
                         }
-                    );
-        
-                    // Delete the original file
-                    fileSystem.unlink(request.files.file.path, function (err) {
-                        if (err) throw err;
-                        console.log('Original file deleted!');
-                    });
-        
-                    result.redirect("/MyUploads/" + _id);
-                } else {
-                    request.status = "error";
-                    request.message = "Please select a valid image.";
-                    result.render("Error", { "request": request });
-                }
-            } else {
-                result.redirect("/Login");
-            }
-        });
-        
-        app.get("/DownloadFile/:fileId", async function (request, result) {
-            if (request.session.user) {
-                const fileId = request.params.fileId;
-                const user = await database.collection("users").findOne({
-                    "_id": ObjectId(request.session.user._id),
-                    "uploaded._id": ObjectId(fileId)
-                });
-        
-                if (!user) {
-                    request.status = "error";
-                    request.message = "File not found.";
-                    result.render("Error", { "request": request });
-                    return;
-                }
-        
-                const file = user.uploaded.find(f => f._id.equals(ObjectId(fileId)));
-                const encryptedFilePath = file.filePath;
-                const decryptedFilePath = path.join("temp", file.name);
-        
-                // Decrypt and decompress (if applicable) the file for download
-                await decryptAndDecompressFile(encryptedFilePath, decryptedFilePath, file.wasCompressed);
-        
-                // Send the decrypted file for download
-                result.download(decryptedFilePath, async function (err) {
-                    if (err) {
-                        console.log(err);
-                    } else {
-                        // After download, compress (if applicable) and re-encrypt the file and store it back
-                        await compressAndEncryptFile(decryptedFilePath, encryptedFilePath, file.wasCompressed);
-        
-                        // Optionally delete the decrypted file from the temp folder
-                        fileSystem.unlink(decryptedFilePath, function (err) {
+
+                        if (!fileSystem.existsSync("public/uploads/" + user.email)){
+                            fileSystem.mkdirSync("public/uploads/" + user.email);
+                        }
+
+                        // Read the file
+                        fileSystem.readFile(request.files.file.path, function (err, data) {
                             if (err) throw err;
-                            console.log('Decrypted file deleted after re-encryption!');
+                            console.log('File read!');
+
+                            // Write the file
+                            fileSystem.writeFile(filePath, data, async function (err) {
+                                if (err) throw err;
+                                console.log('File written!');
+
+                                if (isImage) {
+                                    compressImages(filePath, compressedFilePath, { compress_force: false, statistic: true, autoupdate: true }, false,
+                                        { jpg: { engine: "mozjpeg", command: ["-quality", compression] } },
+                                        { png: { engine: "pngquant", command: ["--quality=" + compression + "-" + compression, "-o"] } },
+                                        { svg: { engine: "svgo", command: "--multipass" } },
+                                        { gif: { engine: "gifsicle", command: ["--colors", "64", "--use-col=web"] } },
+                                        async function (error, completed, statistic) {
+                                            console.log("-------------");
+                                            console.log(error);
+                                            console.log(completed);
+                                            console.log(statistic);
+                                            console.log("-------------");
+
+                                            uploadedObj.size = statistic.size_output;
+
+                                            await database.collection("users").updateOne({
+                                                "_id": ObjectId(request.session.user._id)
+                                            }, {
+                                                $set: {
+                                                    "remainingData": user.remainingData
+                                                },
+                                                $push: {
+                                                    "uploaded": uploadedObj
+                                                }
+                                            });
+
+                                            // Delete the file
+                                            fileSystem.unlink(filePath, function (err) {
+                                                if (err) throw err;
+                                                console.log('File deleted!');
+                                            });
+                                        }
+                                    );
+                                } else {
+                                    await database.collection("users").updateOne({
+                                        "_id": ObjectId(request.session.user._id)
+                                    }, {
+                                        $set: {
+                                            "remainingData": user.remainingData
+                                        },
+                                        $push: {
+                                            "uploaded": uploadedObj
+                                         }
+                                     });
+                                 }
+
+                                 result.redirect("/MyUploads/" + _id);
+                             });
+
+                             // Delete the file
+                             fileSystem.unlink(request.files.file.path, function (err) {
+                                 if (err) throw err;
+                                 console.log('File deleted!');
+                             });
+                         });
+
+                     } else {
+
+                         // if it is a folder
+                         var folderObj = await functions.recursiveGetFolder(user.uploaded, _id);
+
+                         const currentTimestamp = new Date().getTime();
+                         let filePath = "uploads/" + currentTimestamp + "-" + request.files.file.name;
+                         const compressedFilePath = folderObj.folderPath + "/";
+                         uploadedObj.filePath = compressedFilePath + currentTimestamp + "-" + request.files.file.name;
+
+                         if (!isImage) {
+                             filePath = uploadedObj.filePath;
+                        }
+
+                         // Read the file
+                         fileSystem.readFile(request.files.file.path, function (err, data) {
+                             if (err) throw err;
+                             console.log('File read!');
+
+                            // Write the file
+                            fileSystem.writeFile(filePath, data, async function (err) {
+                                if (err) throw err;
+                                console.log('File written!');
+
+                                if (isImage) {
+                                    
+                                    compressImages(filePath, compressedFilePath, { compress_force: false, statistic: true, autoupdate: true }, false,
+                                        { jpg: { engine: "mozjpeg", command: ["-quality", compression] } },
+                                        { png: { engine: "pngquant", command: ["--quality=" + compression + "-" + compression, "-o"] } },
+                                        { svg: { engine: "svgo", command: "--multipass" } },
+                                        { gif: { engine: "gifsicle", command: ["--colors", "64", "--use-col=web"] } },
+                                        async function (error, completed, statistic) {
+                                            console.log("-------------");
+                                            console.log(error);
+                                            console.log(completed);
+                                            console.log(statistic);
+                                            console.log("-------------");
+
+                                            uploadedObj.size = statistic.size_output;
+
+                                            var updatedArray = await functions.getUpdatedArray(user.uploaded, _id, uploadedObj);
+                                            for (var a = 0; a < updatedArray.length; a++) {
+                                                updatedArray[a]._id = ObjectId(updatedArray[a]._id);
+                                            }
+
+                                            await database.collection("users").updateOne({
+                                                "_id": ObjectId(request.session.user._id)
+                                            }, {
+                                                $set: {
+                                                    "uploaded": updatedArray,
+                                                    "remainingData": user.remainingData
+                                                }
+                                            });
+
+                                             // Delete the file
+                                            fileSystem.unlink(filePath, function (err) {
+                                                if (err) throw err;
+                                                console.log('File deleted!');
+                                            });
+                                        }
+                                    );
+                                } else {
+
+                                    var updatedArray = await functions.getUpdatedArray(user.uploaded, _id, uploadedObj);
+                                    for (var a = 0; a < updatedArray.length; a++) {
+                                        updatedArray[a]._id = ObjectId(updatedArray[a]._id);
+                                    }
+
+                                    await database.collection("users").updateOne({
+                                        "_id": ObjectId(request.session.user._id)
+                                    }, {
+                                        $set: {
+                                            "uploaded": updatedArray,
+                                            "remainingData": user.remainingData
+                                        }
+                                    });
+                                }
+
+                                result.redirect("/MyUploads/" + _id);
+                            });
+
+                             // Delete the file
+                            fileSystem.unlink(request.files.file.path, function (err) {
+                                if (err) throw err;
+                                console.log('File deleted!');
+                            });
                         });
                     }
-                });
-            } else {
-                result.redirect("/Login");
+                    
+                } else {
+                    request.status = "error";
+                    request.message = "Please select valid image.";
+
+                    result.render("Error", {
+                        "request": request
+                    });
+                }
+                return false;
             }
+            result.redirect("/Login");
         });
 
         // reset password
