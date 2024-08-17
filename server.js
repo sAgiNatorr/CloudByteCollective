@@ -69,7 +69,7 @@ app.use('/img', express.static(__dirname + '/views/img'));
 app.set("view engine", "ejs");
 
 // main URL of website
-var mainURL = "54.252.220.114";
+var mainURL = "https://cloudbytecollective.pro/";
 
 // to remove folder and all sub-directories in it
 var rimraf = require("rimraf");
